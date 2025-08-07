@@ -1,146 +1,642 @@
+import re
 import asyncio
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 import aiohttp
 from cache import get_cached_result, store_result
+from typing import Optional, Dict, Any
+import base64
 
-# State-specific license verification URLs and selectors
+# Complete state configurations with license formats and verification URLs
 STATE_CONFIGS = {
-    "CA": {
-        "url": "https://www.cslb.ca.gov/OnlineServices/CheckLicenseII/CheckLicense.aspx",
-        "method": "playwright",  # Requires JavaScript
-        "license_input": "#ctl00_ContentPlaceHolder1_txtLicnum",
-        "search_button": "#ctl00_ContentPlaceHolder1_btnSearch",
-        "result_selectors": {
-            "status": ".license-status",
-            "name": ".contractor-name",
-            "expires": ".expiration-date"
-        }
+    "AL": {
+        "regex": r"^\d{5}$",
+        "example": "55289",
+        "type": "General Contractor",
+        "format": "5 digits",
+        "url": "https://genconbd.alabama.gov/DATABASE-SQL/roster.aspx",
+        "method": "playwright"
     },
-    "TX": {
-        "url": "https://www.tdlr.texas.gov/LicenseSearch/",
+    "AK": {
+        "regex": r"^\d{6}$",
+        "example": "110401",
+        "type": "General Contractor",
+        "format": "6 digits",
+        "url": "https://www.commerce.alaska.gov/cbp/main/Search/Professional",
         "method": "playwright",
-        "license_input": "#LicenseNumber",
-        "search_button": "#SearchButton",
-        "result_selectors": {
-            "status": ".status-field",
-            "name": ".business-name",
-            "expires": ".expiration-field"
-        }
+        "notes": "Geo/IP locked; VPN may be required"
+    },
+    "AZ": {
+        "regex": r"^\d{6}$",
+        "example": "321456",
+        "type": "ROC License",
+        "format": "6 digits",
+        "url": "https://azroc.my.site.com/AZRoc/s/contractor-search",
+        "method": "playwright"
+    },
+    "AR": {
+        "regex": r"^\d{8}$",
+        "example": "2880113",
+        "type": "Commercial Contractor",
+        "format": "8 digits, leading zeros allowed",
+        "url": "http://aclb2.arkansas.gov/clbsearch.php?_ga=2.5731125.765643424.1566368253-1789997821.1562103904",
+        "method": "requests",
+        "notes": "Session ID stripped from link"
+    },
+    "CA": {
+        "regex": r"^\d{6,8}$",
+        "example": "927123",
+        "type": "CSLB Contractor",
+        "format": "6 to 8 digits",
+        "url": "https://www.cslb.ca.gov/onlineservices/checklicenseII/checklicense.aspx",
+        "method": "playwright",
+        "notes": "Bot detection; use ModHeader with Referrer spoof"
+    },
+    "CO": {
+        "regex": r"^\d{2}-\d{6}$",
+        "example": "08-000039",
+        "type": "Trade License",
+        "format": "2-digit prefix + 6-digit number",
+        "url": "https://dpo.colorado.gov/",
+        "method": "playwright",
+        "notes": "State licenses only for specific trades"
+    },
+    "CT": {
+        "regex": r"^HIC\.\d{7}$",
+        "example": "HIC.0654321",
+        "type": "Home Improvement Contractor",
+        "format": "Prefix 'HIC.' + 7 digits",
+        "url": "https://www.elicense.ct.gov/lookup/licenselookup.aspx",
+        "method": "playwright",
+        "notes": "General contractors register, not licensed"
+    },
+    "DE": {
+        "regex": r"^\d{10}$",
+        "example": "1990000000",
+        "type": "Business License",
+        "format": "10 digits",
+        "url": "https://delpros.delaware.gov/OH_VerifyLicense",
+        "method": "playwright"
     },
     "FL": {
-        "url": "https://www.myfloridalicense.com/wl11.asp",
-        "method": "requests",  # Simple form submission
-        "form_data": {
-            "licnbr": "{license_number}",
-            "Submit": "Search"
-        }
+        "regex": r"^CGC\d{7}$",
+        "example": "CGC1524312",
+        "type": "Certified General Contractor",
+        "format": "Prefix CGC + 7 digits",
+        "url": "https://www.myfloridalicense.com/wl11.asp?mode=0&SID=",
+        "method": "requests",
+        "notes": "Session-based link"
+    },
+    "GA": {
+        "url": "https://verify.sos.ga.gov/verification/Search.aspx",
+        "method": "playwright"
+    },
+    "HI": {
+        "regex": r"C-\d+",
+        "example": "C-12345",
+        "type": "Professional & Vocational",
+        "format": "Letter + number",
+        "url": "https://mypvl.dcca.hawaii.gov/public-license-search/",
+        "method": "playwright"
+    },
+    "ID": {
+        "regex": r"[A-Z]-\d{5}",
+        "example": "E-12345",
+        "type": "Specialty contractor",
+        "format": "Letter prefix + 5 digits",
+        "url": "dbs.idaho.gov/contractors/",
+        "method": "playwright"
+    },
+    "IL": {
+        "regex": r"\d{7}",
+        "example": "1234567",
+        "type": "Professional",
+        "format": "Seven-digit ID",
+        "url": "ilesonline.idfpr.illinois.gov/DFPR/Lookup/LicenseLookup.aspx",
+        "method": "playwright"
+    },
+    "IN": {
+        "regex": r"PC\d{6}",
+        "example": "PC123456",
+        "type": "Building & Trades",
+        "format": "Prefix + six digits",
+        "url": "mylicense.in.gov/everification/Search.aspx",
+        "method": "playwright"
+    },
+    "IA": {
+        "regex": r"\d{5}",
+        "example": "12345",
+        "type": "Contractor registration",
+        "format": "Five-digit number",
+        "url": "https://laborportal.iwd.iowa.gov/iwd_portal/publicSearch/public",
+        "method": "playwright"
+    },
+    "KS": {
+        "regex": r"T\d{6}",
+        "example": "T123456",
+        "type": "Technical Professions",
+        "format": "T-prefix + six digits",
+        "url": "https://ksbiz.kansas.gov/business-starter-kit/construction/",
+        "method": "playwright"
+    },
+    "KY": {
+        "regex": r"HBC\d{6}",
+        "example": "HBC123456",
+        "type": "Building/Housing trades",
+        "format": "Prefix + six digits",
+        "url": "https://ky.joportal.com/License/Search",
+        "method": "playwright"
+    },
+    "LA": {
+        "regex": r"\d{6}",
+        "example": "123456",
+        "type": "General & Residential Contractors",
+        "format": "Six-digit ID",
+        "url": "https://lslbc.louisiana.gov/contractor-search/",
+        "method": "playwright"
+    },
+    "ME": {
+        "regex": r"\d{4,5}",
+        "example": "1234",
+        "type": "Electrical & Plumbing",
+        "format": "Four to five digit ID",
+        "url": "pfr.maine.gov/ALMSOnline/ALMSQuery/SearchIndividual.aspx",
+        "method": "playwright"
+    },
+    "MD": {
+        "regex": r"\d{2}-\d{6}",
+        "example": "01-123456",
+        "type": "Home Improvement Commission",
+        "format": "Two digit prefix + dash + six digits",
+        "url": "https://www.dllr.state.md.us/cgi-bin/ElectronicLicensing/OP_search/OP_search.cgi?calling_app=HIC::HIC_qselect",
+        "method": "requests"
+    },
+    "MA": {
+        "regex": r"CSL-\d{6}",
+        "example": "CSL-123456",
+        "type": "Construction Supervisor",
+        "format": "Prefix 'CSL-' + six digits",
+        "url": "https://madpl.mylicense.com/Verification/",
+        "method": "playwright"
+    },
+    "MI": {
+        "regex": r"\d{7}",
+        "example": "1234567",
+        "type": "Construction professionals",
+        "format": "Seven-digit numeric ID",
+        "url": "https://www.michigan.gov/lara/i-need-to/find-or-verify-a-licensed-professional-or-business",
+        "method": "playwright"
+    },
+    "MN": {
+        "regex": r"\d{4,6}",
+        "example": "123456",
+        "type": "Residential contractor & trades",
+        "format": "Four to six-digit numeric ID",
+        "url": "https://secure.doli.state.mn.us/lookup/licensing.aspx",
+        "method": "playwright"
+    },
+    "MS": {
+        "regex": r"\d{5}",
+        "example": "12345",
+        "type": "Commercial & Residential Contractors",
+        "format": "Five-digit numeric ID",
+        "url": "http://search.msboc.us/ConsolidatedResults.cfm?ContractorType=&VarDatasource=BOC&Advanced=1",
+        "method": "requests"
+    },
+    "MO": {
+        "example": "KC: 20231234, STL: 23BUS001",
+        "type": "Local Contractor Licensing",
+        "format": "Varies by city",
+        "url": "pr.mo.gov/licensee-search.asp",
+        "method": "playwright",
+        "notes": "No statewide license; city/county level"
+    },
+    "MT": {
+        "regex": r"\d{5}",
+        "example": "12345",
+        "type": "Construction Contractor",
+        "format": "Five-digit numeric ID",
+        "url": "https://erdcontractors.mt.gov/ICCROnlineSearch/registrationlookup.jsp",
+        "method": "playwright"
+    },
+    "NE": {
+        "regex": r"\d{5}",
+        "example": "12345",
+        "type": "Contractor Registration",
+        "format": "Five-digit numeric ID",
+        "url": "https://dol.nebraska.gov/conreg/Search",
+        "method": "playwright"
+    },
+    "NV": {
+        "regex": r"\d{6}",
+        "example": "123456",
+        "type": "State Contractors Board",
+        "format": "Six-digit numeric ID",
+        "url": "https://app.nvcontractorsboard.com/Clients/NVSCB/Public/ContractorLicenseSearch/ContractorLicenseSearch.aspx",
+        "method": "playwright"
+    },
+    "NH": {
+        "regex": r"\d{6}",
+        "example": "123456",
+        "type": "Licensed trades",
+        "format": "Six-digit numeric ID",
+        "url": "oplc.nh.gov/license-lookup",
+        "method": "playwright"
+    },
+    "NJ": {
+        "regex": r"\d{7}",
+        "example": "1234567",
+        "type": "Home Improvement Contractor",
+        "format": "Seven-digit numeric ID",
+        "url": "https://newjersey.mylicense.com/verification/Search.aspx?facility=Y",
+        "method": "playwright"
+    },
+    "NM": {
+        "regex": r"\d{6}",
+        "example": "123456",
+        "type": "Construction Industries Division",
+        "format": "Six-digit numeric ID",
+        "url": "https://public.psiexams.com/search.jsp",
+        "method": "playwright"
+    },
+    "NY": {
+        "example": "NYC HIC: 123456",
+        "type": "Municipal Licensing",
+        "format": "6-digit varies by municipality",
+        "url": "appext20.dos.ny.gov/lcns_public/licenseesearch/lcns_public_index.cfm",
+        "method": "playwright",
+        "notes": "No statewide GC license; local level"
+    },
+    "NC": {
+        "regex": r"\d{5}",
+        "example": "12345",
+        "type": "General Contractor",
+        "format": "Five-digit numeric ID",
+        "url": "https://portal.nclbgc.org/Public/Search",
+        "method": "playwright"
+    },
+    "ND": {
+        "regex": r"\d{5}",
+        "example": "12345",
+        "type": "State Contractor License",
+        "format": "Five-digit numeric ID",
+        "url": "https://firststop.sos.nd.gov/search/contractor",
+        "method": "playwright"
+    },
+    "OH": {
+        "regex": r"[A-Z]{2}\d{6}",
+        "example": "HV123456",
+        "type": "Commercial Trades",
+        "format": "Prefix + six digits",
+        "url": "elicense3.com.ohio.gov/",
+        "method": "playwright"
+    },
+    "OK": {
+        "regex": r"\d{6}",
+        "example": "123456",
+        "type": "Construction Industries Board",
+        "format": "Six-digit numeric ID",
+        "url": "https://okcibv7prod.glsuite.us/GLSuiteWeb/Clients/OKCIB/Public/LicenseeSearch/LicenseeSearch.aspx",
+        "method": "playwright"
+    },
+    "OR": {
+        "regex": r"\d{6}",
+        "example": "123456",
+        "type": "Construction Contractors Board",
+        "format": "Six-digit numeric ID",
+        "url": "https://search.ccb.state.or.us/search/",
+        "method": "playwright"
+    },
+    "PA": {
+        "regex": r"PA\d{6}",
+        "example": "PA123456",
+        "type": "Home Improvement Contractor",
+        "format": "Prefix 'PA' + six digits",
+        "url": "https://hicsearch.attorneygeneral.gov/",
+        "method": "playwright"
+    },
+    "RI": {
+        "example": "Reg ID: 12345",
+        "type": "Contractor Registration",
+        "format": "5-digit numeric registration ID",
+        "url": "https://crb.ri.gov/consumer/search-registrantlicensee",
+        "method": "playwright",
+        "notes": "General contractors registered, not licensed"
+    },
+    "SC": {
+        "regex": r"CLG\d{6}",
+        "example": "CLG123456",
+        "type": "Contractor's Licensing Board",
+        "format": "Prefix + six digits",
+        "url": "https://verify.llronline.com/LicLookup/Contractors/Contractor.aspx?div=69&AspxAutoDetectCookieSupport=1",
+        "method": "playwright"
+    },
+    "SD": {
+        "regex": r"\d{5}",
+        "example": "12345",
+        "type": "Electrical, Plumbing, etc.",
+        "format": "Five-digit numeric ID",
+        "url": "https://sdec.portalus.thentiacloud.net/webs/portal/register/#/",
+        "method": "playwright"
+    },
+    "TN": {
+        "regex": r"\d{6}",
+        "example": "123456",
+        "type": "Commercial & Residential",
+        "format": "Six-digit numeric ID",
+        "url": "https://www.tn.gov/commerce/regboards/contractor.html",
+        "method": "playwright"
+    },
+    "TX": {
+        "regex": r"\d{5,6}",
+        "example": "12345",
+        "type": "Electrical, HVAC, Plumbing",
+        "format": "Five or six-digit numeric ID",
+        "url": "https://www.tdlr.texas.gov/LicenseSearch/",
+        "method": "playwright"
+    },
+    "UT": {
+        "regex": r"\d{6}-\d{4}",
+        "example": "123456-5501",
+        "type": "Contractor",
+        "format": "Six digits + dash + four-digit suffix",
+        "url": "https://secure.utah.gov/llv/search/index.html",
+        "method": "playwright"
+    },
+    "VT": {
+        "example": "Reg ID: 456789",
+        "type": "Contractor Registration",
+        "format": "Numeric registration ID (varies)",
+        "url": "https://sos.vermont.gov/opr/find-a-professional/",
+        "method": "playwright",
+        "notes": "No state GC license; municipal requirements"
+    },
+    "VA": {
+        "regex": r"2705\d{6}",
+        "example": "2710000000",
+        "type": "Class A/B/C Contractors",
+        "format": "10-digit starting with 2705",
+        "url": "https://www.dpor.virginia.gov/LicenseLookup/",
+        "method": "playwright"
+    },
+    "WA": {
+        "regex": r"[A-Z]{3}\d{4}",
+        "example": "ABC1234",
+        "type": "Contractor Registration",
+        "format": "Three letters + four digits",
+        "url": "https://secure.lni.wa.gov/verify/",
+        "method": "playwright"
+    },
+    "WV": {
+        "regex": r"WV\d{6}",
+        "example": "WV012345",
+        "type": "Contractors Licensing Board",
+        "format": "WV + six digits",
+        "url": "https://wvclboard.wv.gov/verify/",
+        "method": "playwright"
+    },
+    "WI": {
+        "regex": r"\d{6}",
+        "example": "123456",
+        "type": "Dwelling Contractor",
+        "format": "Six-digit numeric ID",
+        "url": "dsps.wi.gov/Pages/Professions/Default.aspx",
+        "method": "playwright"
+    },
+    "WY": {
+        "regex": r"\d{5}",
+        "example": "12345",
+        "type": "Local Licensing Only",
+        "format": "Five-digit numeric ID (varies)",
+        "url": "https://doe.state.wy.us/lmi/licensed_occupations.htm",
+        "method": "playwright",
+        "notes": "Local licensing only"
     }
-    # Add more states as needed
 }
 
-async def verify_license_playwright(state_config, license_number, business_name=None):
-    """Verify license using Playwright for JavaScript-heavy sites"""
+def validate_license_format(state: str, license_number: str) -> Dict[str, Any]:
+    """Validate license number format against state requirements"""
+    state = state.upper()
+    
+    if state not in STATE_CONFIGS:
+        return {
+            "valid": False,
+            "error": f"License format validation not available for {state}",
+            "supported_states": list(STATE_CONFIGS.keys())
+        }
+    
+    config = STATE_CONFIGS[state]
+    regex_pattern = config.get("regex")
+    
+    if not regex_pattern:
+        return {
+            "valid": True,
+            "warning": f"No standard format for {state} - {config.get('notes', 'varies by municipality')}",
+            "format_info": config
+        }
+    
+    is_valid = bool(re.match(regex_pattern, license_number))
+    
+    return {
+        "valid": is_valid,
+        "format_info": config,
+        "expected_format": config["format"],
+        "example": config["example"],
+        "notes": config.get("notes")
+    }
+
+async def scrape_with_playwright(state: str, config: Dict, license_number: str, business_name: Optional[str] = None) -> Dict[str, Any]:
+    """Generic Playwright scraping function"""
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
+        browser = await p.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-blink-features=AutomationControlled']
+        )
+        
+        # Use different user agents and headers based on state requirements
+        user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        extra_headers = {}
+        
+        if state == "CA":
+            extra_headers['Referer'] = 'https://www.cslb.ca.gov/'
+        
+        context = await browser.new_context(
+            user_agent=user_agent,
+            extra_http_headers=extra_headers
+        )
+        page = await context.new_page()
         
         try:
-            # Navigate to the license verification page
-            await page.goto(state_config["url"], wait_until="networkidle")
+            await page.goto(config["url"], wait_until="networkidle", timeout=30000)
             
-            # Fill in the license number
-            if license_number:
-                await page.fill(state_config["license_input"], license_number)
+            # State-specific scraping logic
+            if state == "CA":
+                await page.fill("#ctl00_ContentPlaceHolder1_txtLicnum", license_number)
+                await page.click("#ctl00_ContentPlaceHolder1_btnSearch")
+            elif state == "FL":
+                await page.fill("input[name='licnbr']", license_number)
+                await page.click("input[name='Submit']")
+            elif state == "TX":
+                await page.fill("#LicenseNumber", license_number)
+                await page.click("#SearchButton")
+            elif state == "OR":
+                await page.fill("input[name='license_number']", license_number)
+                await page.click("input[type='submit']")
+            elif state == "WA":
+                await page.fill("input[name='licenseNumber']", license_number)
+                await page.click("input[value='Search']")
+            else:
+                # Generic approach - look for common input patterns
+                license_inputs = await page.query_selector_all("input[type='text'], input[name*='license'], input[id*='license']")
+                if license_inputs:
+                    await license_inputs[0].fill(license_number)
+                
+                search_buttons = await page.query_selector_all("input[type='submit'], button[type='submit'], input[value*='Search'], button:has-text('Search')")
+                if search_buttons:
+                    await search_buttons[0].click()
             
-            # Click search button
-            await page.click(state_config["search_button"])
-            await page.wait_for_load_state("networkidle")
+            # Wait for results
+            await page.wait_for_load_state("networkidle", timeout=15000)
             
             # Take screenshot for evidence
             screenshot_bytes = await page.screenshot(full_page=True)
             
-            # Extract results using the configured selectors
-            result_data = {}
-            for field, selector in state_config["result_selectors"].items():
-                try:
-                    element = await page.query_selector(selector)
-                    if element:
-                        result_data[field] = await element.text_content()
-                except:
-                    result_data[field] = "Not found"
+            # Extract results - generic approach
+            content = await page.content()
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # Determine license status
+            status = "Unknown"
+            business_name_result = business_name or "Unknown"
+            expires = "Unknown"
+            
+            content_lower = content.lower()
+            if any(word in content_lower for word in ["active", "valid", "current", "good standing"]):
+                status = "Active"
+            elif any(word in content_lower for word in ["expired", "inactive", "lapsed"]):
+                status = "Expired"
+            elif any(word in content_lower for word in ["invalid", "not found", "no results", "no license"]):
+                status = "Invalid"
+            elif any(word in content_lower for word in ["suspended", "revoked", "cancelled"]):
+                status = "Suspended"
+            
+            # Try to extract business name if not provided
+            if business_name_result == "Unknown":
+                name_patterns = [
+                    r"business name[:\s]+([^<\n\r]+)",
+                    r"company name[:\s]+([^<\n\r]+)",
+                    r"contractor name[:\s]+([^<\n\r]+)",
+                    r"name[:\s]+([^<\n\r]+)"
+                ]
+                for pattern in name_patterns:
+                    match = re.search(pattern, content_lower)
+                    if match:
+                        business_name_result = match.group(1).strip()
+                        break
+            
+            # Try to extract expiration date
+            date_patterns = [
+                r"expir[a-z]*[:\s]+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})",
+                r"expires?[:\s]+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})",
+                r"valid through[:\s]+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})"
+            ]
+            for pattern in date_patterns:
+                match = re.search(pattern, content_lower)
+                if match:
+                    expires = match.group(1)
+                    break
             
             await browser.close()
             
             return {
-                "status": result_data.get("status", "Unknown"),
+                "status": status,
                 "license_number": license_number,
-                "business_name": result_data.get("name", "Unknown"),
-                "issuing_authority": f"{state_config.get('authority', 'State')} Licensing Board",
-                "expires": result_data.get("expires", "Unknown"),
-                "screenshot_data": screenshot_bytes,
-                "verified": True
+                "business_name": business_name_result,
+                "issuing_authority": f"{state} {config.get('type', 'Licensing Board')}",
+                "expires": expires,
+                "screenshot_data": base64.b64encode(screenshot_bytes).decode('utf-8'),
+                "verified": True,
+                "verification_url": config["url"],
+                "format_valid": validate_license_format(state, license_number)["valid"]
             }
             
         except Exception as e:
             await browser.close()
-            raise Exception(f"Error scraping license data: {str(e)}")
+            raise Exception(f"Error scraping {state} license data: {str(e)}")
 
-async def verify_license_requests(state_config, license_number, business_name=None):
-    """Verify license using simple HTTP requests"""
+async def scrape_with_requests(state: str, config: Dict, license_number: str, business_name: Optional[str] = None) -> Dict[str, Any]:
+    """HTTP requests scraping for simpler sites"""
     async with aiohttp.ClientSession() as session:
         try:
-            # Prepare form data
-            form_data = {}
-            for key, value in state_config["form_data"].items():
-                if "{license_number}" in value:
-                    form_data[key] = value.format(license_number=license_number)
-                else:
-                    form_data[key] = value
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate'
+            }
             
-            # Submit the form
-            async with session.post(state_config["url"], data=form_data) as response:
+            # Prepare form data based on state
+            if state == "FL":
+                form_data = {
+                    'licnbr': license_number,
+                    'Submit': 'Search'
+                }
+            elif state == "AR":
+                form_data = {
+                    'license_number': license_number,
+                    'search': 'Search'
+                }
+            elif state == "MD":
+                form_data = {
+                    'license_number': license_number,
+                    'action': 'search'
+                }
+            else:
+                # Generic form data
+                form_data = {
+                    'license_number': license_number,
+                    'search': 'Search'
+                }
+            
+            # Submit search request
+            async with session.post(config["url"], data=form_data, headers=headers) as response:
                 html_content = await response.text()
-                
-            # Parse the response
+            
+            # Parse results
             soup = BeautifulSoup(html_content, 'html.parser')
             
-            # Extract license information (customize based on state's HTML structure)
+            # Determine status
             status = "Unknown"
-            business_name_result = "Unknown"
+            business_name_result = business_name or "Unknown"
             expires = "Unknown"
             
-            # Look for common patterns in license verification results
-            if "active" in html_content.lower():
+            content_lower = html_content.lower()
+            if any(word in content_lower for word in ["active", "valid", "current"]):
                 status = "Active"
-            elif "expired" in html_content.lower():
+            elif any(word in content_lower for word in ["expired", "inactive"]):
                 status = "Expired"
-            elif "invalid" in html_content.lower():
+            elif any(word in content_lower for word in ["invalid", "not found", "no results"]):
                 status = "Invalid"
             
             return {
                 "status": status,
                 "license_number": license_number,
                 "business_name": business_name_result,
-                "issuing_authority": f"State Licensing Board",
+                "issuing_authority": f"{state} {config.get('type', 'Licensing Board')}",
                 "expires": expires,
                 "verified": True,
-                "raw_html": html_content[:1000]  # First 1000 chars for debugging
+                "verification_url": config["url"],
+                "format_valid": validate_license_format(state, license_number)["valid"],
+                "raw_html_snippet": html_content[:500]  # First 500 chars for debugging
             }
             
         except Exception as e:
-            raise Exception(f"Error verifying license: {str(e)}")
+            raise Exception(f"Error verifying {state} license: {str(e)}")
 
-async def verify_license(state, license_number=None, business_name=None):
+async def verify_license(state: str, license_number: Optional[str] = None, business_name: Optional[str] = None) -> Dict[str, Any]:
     """Main license verification function"""
     
-    # Check cache first
-    cache_key = f"{state}_{license_number}_{business_name}"
-    cached = get_cached_result(cache_key)
-    if cached:
-        return cached
-    
-    # Validate inputs
+    # Input validation
     if not state:
         raise Exception("State is required")
     
@@ -149,7 +645,14 @@ async def verify_license(state, license_number=None, business_name=None):
     
     state = state.upper()
     
-    # Check if we have configuration for this state
+    # Check cache first
+    cache_key = f"{state}_{license_number}_{business_name}"
+    cached = get_cached_result(cache_key)
+    if cached:
+        cached["from_cache"] = True
+        return cached
+    
+    # Check if state is supported
     if state not in STATE_CONFIGS:
         return {
             "status": "Unsupported",
@@ -158,14 +661,31 @@ async def verify_license(state, license_number=None, business_name=None):
             "verified": False
         }
     
-    state_config = STATE_CONFIGS[state]
+    config = STATE_CONFIGS[state]
+    
+    # Validate license format if provided
+    if license_number:
+        format_validation = validate_license_format(state, license_number)
+        if not format_validation["valid"] and "warning" not in format_validation:
+            return {
+                "status": "Invalid Format",
+                "message": f"License number '{license_number}' does not match expected format for {state}",
+                "expected_format": format_validation["format_info"]["format"],
+                "example": format_validation["format_info"]["example"],
+                "verified": False
+            }
     
     try:
-        # Use appropriate scraping method based on state configuration
-        if state_config["method"] == "playwright":
-            result = await verify_license_playwright(state_config, license_number, business_name)
+        # Choose scraping method
+        if config["method"] == "playwright":
+            result = await scrape_with_playwright(state, config, license_number, business_name)
         else:
-            result = await verify_license_requests(state_config, license_number, business_name)
+            result = await scrape_with_requests(state, config, license_number, business_name)
+        
+        # Add state-specific information
+        result["state"] = state
+        result["license_type"] = config.get("type", "Unknown")
+        result["notes"] = config.get("notes")
         
         # Cache the result
         store_result(cache_key, result)
@@ -173,38 +693,176 @@ async def verify_license(state, license_number=None, business_name=None):
         return result
         
     except Exception as e:
-        return {
+        error_result = {
             "status": "Error",
             "message": str(e),
             "license_number": license_number,
-            "verified": False
+            "state": state,
+            "verified": False,
+            "verification_url": config["url"]
         }
+        
+        # Cache error results for a shorter time to allow retries
+        store_result(f"error_{cache_key}", error_result)
+        
+        return error_result
 
-async def verify_batch(requests):
-    """Verify multiple licenses in batch"""
-    tasks = []
-    for r in requests:
-        task = verify_license(
-            r.get("state"),
-            r.get("license_number"),
-            r.get("business_name")
-        )
-        tasks.append(task)
+async def verify_batch(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Verify multiple licenses in batch with rate limiting"""
     
-    # Run all verifications concurrently
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    # Group requests by state to optimize scraping
+    state_groups = {}
+    for i, request in enumerate(requests):
+        state = request.get("state", "").upper()
+        if state not in state_groups:
+            state_groups[state] = []
+        state_groups[state].append((i, request))
     
-    # Convert exceptions to error dictionaries
-    processed_results = []
-    for i, result in enumerate(results):
-        if isinstance(result, Exception):
-            processed_results.append({
-                "status": "Error",
-                "message": str(result),
-                "license_number": requests[i].get("license_number"),
-                "verified": False
-            })
-        else:
-            processed_results.append(result)
+    results = [None] * len(requests)
     
-    return processed_results
+    # Process each state group with appropriate delays
+    for state, state_requests in state_groups.items():
+        for i, (original_index, request) in enumerate(state_requests):
+            try:
+                # Add delay between requests to avoid overwhelming servers
+                if i > 0:
+                    await asyncio.sleep(2)  # 2 second delay between requests to same state
+                
+                result = await verify_license(
+                    request.get("state"),
+                    request.get("license_number"),
+                    request.get("business_name")
+                )
+                results[original_index] = result
+                
+            except Exception as e:
+                results[original_index] = {
+                    "status": "Error",
+                    "message": str(e),
+                    "license_number": request.get("license_number"),
+                    "state": request.get("state"),
+                    "verified": False
+                }
+        
+        # Add longer delay between different states
+        await asyncio.sleep(1)
+    
+    return results
+
+def get_supported_states() -> Dict[str, Dict[str, Any]]:
+    """Get list of supported states with their configurations"""
+    return {
+        state: {
+            "type": config.get("type", "Unknown"),
+            "format": config.get("format", "Unknown"),
+            "example": config.get("example", "Unknown"),
+            "notes": config.get("notes")
+        }
+        for state, config in STATE_CONFIGS.items()
+    }
+
+def search_by_business_name(state: str, business_name: str) -> Dict[str, Any]:
+    """Search for licenses by business name (placeholder for future implementation)"""
+    # This would require more sophisticated scraping as each state
+    # has different search interfaces for business names
+    return {
+        "status": "Not Implemented",
+        "message": "Business name search not yet implemented",
+        "suggestion": "Please provide license number for verification"
+    }
+
+# State-specific parsing functions for better accuracy
+async def parse_california_results(page) -> Dict[str, Any]:
+    """Parse California CSLB specific results"""
+    try:
+        # Look for specific CSLB result elements
+        status_element = await page.query_selector(".license-status, #license-status")
+        name_element = await page.query_selector(".contractor-name, #contractor-name")
+        expires_element = await page.query_selector(".expiration-date, #expiration-date")
+        
+        status = await status_element.text_content() if status_element else "Unknown"
+        name = await name_element.text_content() if name_element else "Unknown"
+        expires = await expires_element.text_content() if expires_element else "Unknown"
+        
+        return {"status": status, "name": name, "expires": expires}
+    except:
+        return {"status": "Unknown", "name": "Unknown", "expires": "Unknown"}
+
+async def parse_florida_results(page) -> Dict[str, Any]:
+    """Parse Florida DBPR specific results"""
+    try:
+        # Florida typically shows results in a table format
+        rows = await page.query_selector_all("tr")
+        license_data = {}
+        
+        for row in rows:
+            cells = await row.query_selector_all("td")
+            if len(cells) >= 2:
+                label = await cells[0].text_content()
+                value = await cells[1].text_content()
+                license_data[label.lower().strip()] = value.strip()
+        
+        status = license_data.get("status", "Unknown")
+        name = license_data.get("business name", license_data.get("name", "Unknown"))
+        expires = license_data.get("expiration", license_data.get("expires", "Unknown"))
+        
+        return {"status": status, "name": name, "expires": expires}
+    except:
+        return {"status": "Unknown", "name": "Unknown", "expires": "Unknown"}
+
+# Enhanced error handling and logging
+class LicenseVerificationError(Exception):
+    """Custom exception for license verification errors"""
+    def __init__(self, message: str, state: str, license_number: str, error_type: str = "general"):
+        self.message = message
+        self.state = state
+        self.license_number = license_number
+        self.error_type = error_type
+        super().__init__(self.message)
+
+def log_verification_attempt(state: str, license_number: str, success: bool, error: str = None):
+    """Log verification attempts for monitoring and debugging"""
+    # In production, you might want to use proper logging
+    print(f"Verification attempt: {state}-{license_number} - {'SUCCESS' if success else 'FAILED'}")
+    if error:
+        print(f"Error: {error}")
+
+# Utility functions
+def normalize_license_number(state: str, license_number: str) -> str:
+    """Normalize license number format for a given state"""
+    state = state.upper()
+    license_number = license_number.strip().upper()
+    
+    # State-specific normalization
+    if state == "CA" and not license_number.isdigit():
+        # Remove any non-digit characters for CA
+        license_number = re.sub(r'\D', '', license_number)
+    elif state == "FL" and not license_number.startswith("CGC"):
+        # Add CGC prefix if missing for Florida
+        if license_number.isdigit():
+            license_number = f"CGC{license_number}"
+    elif state == "PA" and not license_number.startswith("PA"):
+        # Add PA prefix if missing
+        if license_number.isdigit():
+            license_number = f"PA{license_number}"
+    
+    return license_number
+
+def get_state_info(state: str) -> Dict[str, Any]:
+    """Get detailed information about a state's licensing system"""
+    state = state.upper()
+    if state not in STATE_CONFIGS:
+        return {"error": f"State {state} not supported"}
+    
+    config = STATE_CONFIGS[state]
+    return {
+        "state": state,
+        "license_type": config.get("type", "Unknown"),
+        "format": config.get("format", "Unknown"),
+        "example": config.get("example", "Unknown"),
+        "regex": config.get("regex"),
+        "verification_url": config["url"],
+        "method": config["method"],
+        "notes": config.get("notes"),
+        "requirements": config.get("requirements")
+    }
