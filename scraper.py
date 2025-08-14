@@ -6,6 +6,8 @@ import aiohttp
 from cache import get_cached_result, store_result
 from typing import Optional, Dict, Any
 import base64
+from typing import List, Dict, Any
+
 
 # Complete state configurations with license formats and verification URLs
 STATE_CONFIGS = {
