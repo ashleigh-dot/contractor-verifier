@@ -2,11 +2,19 @@ services:
   - type: web
     name: contractor-verifier
     runtime: python
+    plan: free
+
     buildCommand: |
+      pip install --upgrade pip
       pip install -r requirements.txt
-      python -m playwright install --with-deps
-    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+      # Install Playwright + OS deps and put browsers inside the build image
+      PLAYWRIGHT_BROWSERS_PATH=0 python -m playwright install --with-deps chromium
+
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
+
     envVars:
       - key: PYTHON_VERSION
         value: 3.10
-    plan: free
+      # Ensures Playwright looks for browsers inside the image, not a missing cache path
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: "0"
